@@ -111,44 +111,97 @@ def query_agent_s3(state):
     return {'s3_response': response}
 
 
-def interview_state(state):
-    """S0 conducts an interview by asking clarifying questions to S1, S2, and S3."""
+def interview_state(state, max_rounds=3):
+    """
+    Conduct multiple rounds of interviews and clarifications between S0 and scientists S1, S2, and S3.
+    Ensures new questions are dynamically generated each round based on the latest responses.
+    """
     groq_agent = Groq()
 
-    # S0 asks questions based on previous responses
-    interview_prompt = f"""
-    You are S0, the leader scientist, conducting an interview to refine and clarify the topic: '{state['topic']}'.
+    for round_num in range(1, max_rounds + 1):
+        print(f"\n--- Conversation Round {round_num} ---\n")
 
-    Based on the responses so far:
-    - S1 (Historical Context): {state['s1_response']}
-    - S2 (Technical Analysis): {state['s2_response']}
-    - S3 (Ethical Implications): {state['s3_response']}
+        # Step 1: S0 generates new clarifying questions
+        interview_prompt_s0 = f"""
+        You are S0, the leader scientist, conducting an interview to refine and clarify the topic: '{state['topic']}'.
 
-    Your task is to ask 2-3 clarifying questions to improve the overall understanding of the topic.
-    Provide the questions in a simple, numbered list format.
-    """
+        Current responses (Round {round_num - 1}):
+        - S1 (Historical Context): {state['s1_response']}
+        - S2 (Technical Analysis): {state['s2_response']}
+        - S3 (Ethical Implications): {state['s3_response']}
 
-    # Generate questions for refinement
-    completion = groq_agent.chat.completions.create(
-        model="llama3-8b-8192",
-        messages=[{"role": "system", "content": interview_prompt}],
-        temperature=0.7,
-        max_tokens=300,
-    )
-    questions = completion.choices[0].message.content.strip()
-    print(f"S0's Interview Questions:\n{questions}")
+        Include all prior notes or clarifications:
+        {state.get('additional_notes', '')}
 
-    # Each persona refines their answers based on the questions
-    updated_s1_response = refine_response(state['s1_response'], questions, "S1")
-    updated_s2_response = refine_response(state['s2_response'], questions, "S2")
-    updated_s3_response = refine_response(state['s3_response'], questions, "S3")
+        Generate 2-3 NEW clarifying questions to improve the understanding of the topic.
+        Avoid repeating any previous questions. Provide the questions in a numbered list.
+        """
 
-    # Update the state with refined responses
-    return {
-        "s1_response": updated_s1_response,
-        "s2_response": updated_s2_response,
-        "s3_response": updated_s3_response
-    }
+        # S0 generates new clarifying questions
+        completion_s0 = groq_agent.chat.completions.create(
+            model="llama3-8b-8192",
+            messages=[{"role": "system", "content": interview_prompt_s0}],
+            temperature=0.7,
+            max_tokens=300,
+        )
+        clarifying_questions = completion_s0.choices[0].message.content.strip()
+        print(f"S0's Questions (Round {round_num}):\n{clarifying_questions}")
+
+        # Step 2: S1, S2, and S3 refine their responses based on S0's new questions
+        updated_s1_response = refine_response(state['s1_response'], clarifying_questions, "S1")
+        updated_s2_response = refine_response(state['s2_response'], clarifying_questions, "S2")
+        updated_s3_response = refine_response(state['s3_response'], clarifying_questions, "S3")
+
+        # Update the state with refined responses
+        state['s1_response'] = updated_s1_response
+        state['s2_response'] = updated_s2_response
+        state['s3_response'] = updated_s3_response
+
+        # Step 3: Scientists ask new follow-up questions for S0
+        scientists_questions = ""
+        for scientist, response in zip(
+            ["S1", "S2", "S3"], [updated_s1_response, updated_s2_response, updated_s3_response]
+        ):
+            scientist_prompt = f"""
+            You are {scientist}, generating new follow-up questions to ask S0 based on your latest refined response.
+
+            Latest Refined Response (Round {round_num}):
+            {response}
+
+            Generate 1-2 NEW questions for S0 to clarify or guide further exploration of the topic.
+            Avoid repeating any previous questions. Provide the questions in a numbered list.
+            """
+            completion = groq_agent.chat.completions.create(
+                model="llama3-8b-8192",
+                messages=[{"role": "system", "content": scientist_prompt}],
+                temperature=0.7,
+                max_tokens=300,
+            )
+            questions = completion.choices[0].message.content.strip()
+            print(f"{scientist}'s Questions for S0 (Round {round_num}):\n{questions}\n")
+            scientists_questions += f"\n{scientist}'s Questions:\n{questions}"
+
+        # Step 4: S0 responds to scientists' follow-up questions
+        response_to_scientists_prompt = f"""
+        You are S0, the leader scientist. Respond to the following new questions asked by your team members (Round {round_num}):
+
+        {scientists_questions}
+
+        Provide clear and concise answers to help your team refine their understanding.
+        """
+        completion_s0_response = groq_agent.chat.completions.create(
+            model="llama3-8b-8192",
+            messages=[{"role": "system", "content": response_to_scientists_prompt}],
+            temperature=0.7,
+            max_tokens=500,
+        )
+        s0_additional_notes = completion_s0_response.choices[0].message.content.strip()
+        print(f"S0's Responses to Scientists (Round {round_num}):\n{s0_additional_notes}")
+
+        # Append S0's answers to the additional notes
+        state['additional_notes'] += f"\nRound {round_num} Notes:\n{s0_additional_notes}"
+
+    return state
 
 
 def refine_response(original_response, questions, persona_name):
